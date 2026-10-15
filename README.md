@@ -1,44 +1,80 @@
-# SolidworksMac – Safe Rename macro
+# SolidworksMac – Safe Rename
 
-`src/SafeRename.bas` is a SOLIDWORKS VBA macro. It renames a part or sub-assembly that is used in the active assembly **without breaking references** in the assemblies, drawings and derived parts that use it.
+A SOLIDWORKS macro with a dialog for renaming parts and sub-assemblies used in an assembly. It renames them **without breaking references** in the assemblies, drawings and derived parts that use them.
 
-## Install
+**Ready to run:** [`dist/SafeRename.swp`](dist/SafeRename.swp)
 
-1. In SOLIDWORKS: **Tools > Macro > New…** and save it as `SafeRename.swp`.
-2. In the VBA editor, delete the default module (`SafeRename1`/`Module1`). Then use **File > Import File…** and pick `src/SafeRename.bas`.
-3. Check **Tools > References**. *SldWorks 20xx Type Library* must be ticked (it is by default).
-4. Save. You can also assign the macro to a toolbar button with **Tools > Customize > Commands > Macro**.
+## Run it
 
-## Use
+1. Download `dist/SafeRename.swp` and save it somewhere permanent, e.g. `C:\SOLIDWORKS Macros\`.
+2. Open your assembly in SOLIDWORKS. It must have been saved at least once.
+3. Select the parts or sub-assemblies to rename, in the FeatureManager tree or the graphics area.
+4. **Tools > Macro > Run…** and pick `SafeRename.swp`.
 
-1. Open the top-level assembly and save it.
-2. Select one or more components, in the FeatureManager tree or in the graphics area. They can be at any level, including inside sub-assemblies.
-3. Run the macro (**Tools > Macro > Run**, entry point `main`).
-4. Type a new file name for each selected file.
-5. Pick the folder to search for files that use it. The default is the top assembly's folder plus its sub-folders. Choose a higher-level project folder if drawings or other assemblies are stored elsewhere.
-6. Check the summary and confirm.
+To get a toolbar button: **Tools > Customize > Commands > Macro**. Drag *New Macro Button* onto a toolbar and choose `SafeRename.swp` (method `main`).
 
-## What it does
+The macro is stored as source code. On first run, SOLIDWORKS compiles it, which takes a moment.
 
-| Step | Detail |
-|------|--------|
-| Where-used search | Every `.sldasm`, `.slddrw` and `.sldprt` in the search folder is checked with `GetDocumentDependencies2`. Files are not opened during the scan. |
-| Load dependents | Every file that references the target is opened, so SOLIDWORKS updates it in memory. |
-| Rename | `ModelDocExtension.RenameDocument` does the rename. This is the same engine as *Rename Component > Rename Document* (SW 2018+). If it fails, the macro falls back to *Save As* (not a copy). |
-| Save | The top assembly (with referenced documents), the renamed file, the parent assemblies inside the active assembly, and all dependents are saved. Drawings are saved last. |
-| Verify | Every saved file is read back from disk. It must reference the new file name and must no longer reference the old one. |
-| Clean up | Files the macro opened are closed again. A drawing with the same name as the old file can be renamed too, if you agree. Only after verification passes are you offered to move the old file into `_RenameBackup`. The default answer is to keep it. |
-| Log | `SafeRename_Log_<timestamp>.txt` is written next to the top assembly. |
+## The dialog
 
-## Settings
+| Section | What you do |
+|---|---|
+| **1. Files to rename** | The selected components are listed. Click a row and type the new file name. The name is checked as you type: invalid characters, existing files, duplicates, read-only files. *Add selected components* adds more without closing the dialog. |
+| **2. Where-used search folder** | The folder (and, optionally, its sub-folders) searched for assemblies, drawings and parts that use the files. It defaults to the assembly's folder. *Find where-used* shows how many files use each part. |
+| **3. Options** | Rename the drawing with the same name · close documents the macro opened · Save As fallback · keep the old file or move it to `_RenameBackup` · write a log file. |
+| Progress and log | A live progress bar and a log of every file opened, saved and verified. |
+| **Rename and verify** | Confirms, then renames everything and verifies it. |
 
-You can change these constants at the top of the module: `ALLOW_SAVEAS_FALLBACK`, `OFFER_DRAWING_RENAME`, `CLOSE_OPENED_DOCS`, `BACKUP_FOLDER_NAME` and `WRITE_LOG_FILE`.
+The dialog is modeless. You can keep selecting components in SOLIDWORKS while it is open.
+
+## What happens on *Rename and verify*
+
+1. **Where-used search.** Every `.sldasm`, `.slddrw` and `.sldprt` in the search folder is checked with `GetDocumentDependencies2`. Files are not opened during the search.
+2. **Load dependents.** Every file that uses the part is opened, so SOLIDWORKS updates it in memory.
+3. **Rename.** `ModelDocExtension.RenameDocument` does the rename. This is the same engine as *Rename Component > Rename Document* (SW 2018+). If it fails, the macro falls back to *Save As* (not a copy).
+4. **Save.** The top assembly, the renamed file, the parent sub-assemblies and every dependent are saved. Drawings are saved last.
+5. **Verify.** Every saved file is read back from disk. It must reference the new name and must no longer reference the old one.
+6. **Clean up.** Only after verification passes: rename the matching drawing and/or move the old file to `_RenameBackup`, if those options are on. A log file is written next to the assembly.
 
 ## Limitations
 
-- Only files inside the search folder are found. A file stored elsewhere that uses the renamed file keeps pointing at the old file. That is why the old file is kept unless you choose otherwise.
-- Files that are read-only, open on another computer, or checked in to **SOLIDWORKS PDM** cannot be changed. For a PDM vault, use the vault's own *Rename* command, which updates references server-side.
-- Virtual components have no file. Use *Rename Component* for them instead. Toolbox parts should not be renamed.
-- Changing only upper/lower case (e.g. `bracket` → `Bracket`) is refused. Rename to a temporary name first.
-- Suppressed instances are not loaded and may keep the old reference. Verification will report this; unsuppress them and run again.
-- Back up your data (or use PDM) before renaming in bulk. The macro saves every affected document.
+- Only files inside the search folder are found. Files stored elsewhere keep pointing at the old file. That is why *Keep the old file* is the default.
+- Read-only files, files open on another computer, and files checked in to **SOLIDWORKS PDM** cannot be changed. For a PDM vault, use the vault's own *Rename* command.
+- Virtual components have no file. Use *Rename Component* for them instead. Do not rename Toolbox parts.
+- Changing only upper/lower case is refused. Rename to a temporary name first.
+- Suppressed instances are not loaded and may keep the old reference. Verification reports this.
+- The macro saves every affected document. Back up your data before renaming in bulk.
+
+## Troubleshooting
+
+- **"Can't find project or library"** on first run: in the VBA editor (**Tools > Macro > Edit**), open **Tools > References**. Untick any entry marked *MISSING*, and make sure *SldWorks Type Library*, *SOLIDWORKS Constant type library* and *Microsoft Forms 2.0 Object Library* are ticked. Then save.
+- **"wrong format and cannot be converted"**: build the macro by hand (below). It takes about two minutes.
+
+### Build the macro by hand (fallback)
+
+1. **Tools > Macro > New…** and save it as `SafeRename.swp`.
+2. In the VBA editor, delete the default module. Then **File > Import File…** and pick `src/SafeRename.bas`.
+3. **Insert > UserForm**. In the Properties window, set its *(Name)* to `frmSafeRename`.
+4. Right-click the form, choose **View Code**, and paste the full contents of `src/frmSafeRename.vba`. All controls are created by code, so the form itself stays empty.
+5. Check **Tools > References** as described above. Then **Save**.
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `src/SafeRename.bas` | Engine and entry point (`main`) |
+| `src/frmSafeRename.vba` | Dialog code. Controls are built at run time. |
+| `tools/build_swp.py` | Generates `dist/SafeRename.swp` from `src/` (Python 3, standard library only) |
+| `dist/SafeRename.swp` | The built macro |
+
+Rebuild after changing the sources:
+
+```
+python3 tools/build_swp.py
+```
+
+The generator writes an OLE compound file containing a source-only VBA project (MS-CFB / MS-OVBA), inside the APC host storage that SOLIDWORKS uses for macros. The output is byte-for-byte reproducible.
+
+It was validated with `olefile`/`oletools` (container, compression, `dir` stream, form designer). It was also validated by importing the same VBA project into LibreOffice, which loaded all modules and the dialog.
+
+The SOLIDWORKS host streams and project references were taken from a SOLIDWORKS-saved macro by [codestack.net](https://github.com/xarial/codestack) (MIT licence).

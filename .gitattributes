@@ -1,2 +1,3 @@
 *.bas text eol=crlf
+*.vba text eol=crlf
 *.swp binary
