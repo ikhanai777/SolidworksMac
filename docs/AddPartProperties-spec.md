@@ -1,6 +1,6 @@
 # Spec – Add Part Properties macro
 
-**Status:** Draft for review
+**Status:** Implemented – `src/AddPartProperties.bas`, `src/frmAddPartProperties.vba`, built to `dist/AddPartProperties.swp`
 **Macro name:** `AddPartProperties.swp` (entry point `main`)
 **Target:** SOLIDWORKS 2020 or later, VBA macro, same build approach as `SafeRename` (`src/` + `tools/build_swp.py` → `dist/`)
 
@@ -12,7 +12,7 @@ Add up to four custom properties to every part used in the active assembly, so t
 |---|---|---|---|---|---|
 | 1 | `DESCRIPTION` | Text | Typed by the user | Asked **once per part** | — (always every part) |
 | 2 | `Material` | Text | Typed by the user | Asked **once** for all parts; the user can pick **exceptions** and type a different material for them | All parts / all parts with exceptions |
-| 3 | `Weight` | Equation | Linked to `SW-Mass`, in **kg** | Automatic, no prompt | — (always every part) |
+| 3 | `Weight` | Equation (text expression) | Linked to `SW-Mass`, in **kg** | Automatic, no prompt | — (always every part) |
 | 4 | `Size` | Text | Typed by the user, or `-` | Either **one value for all parts** (default `-`) or **typed per part** | Same for all / per part |
 
 Property names are written exactly as shown above, case included: `DESCRIPTION`, `Material`, `Weight`, `Size`.
@@ -38,11 +38,13 @@ Property names are written exactly as shown above, case included: `DESCRIPTION`,
 | Virtual components | Not separate files; never changed. |
 | Files in a **SOLIDWORKS PDM** vault (checked in or checked out) | Must be changed through PDM, not by this macro. |
 | Read-only files / files open by another user | Cannot be saved. |
-| Toolbox parts (`IsToolboxPart`) | Shared library files; must not be changed. |
+| Toolbox library parts (`ToolboxPartType` = standard) | Shared library files; must not be changed. |
 | Suppressed components | No model loaded. |
 | Envelope components | Not real parts. |
 
 PDM detection: a file is treated as a PDM file if it is inside a PDM vault view (a folder whose root carries the PDM vault view marker) or if it is read-only. **To verify during implementation:** the exact vault-view marker on the target PDM version. The read-only test alone already catches checked-in files, because PDM keeps them read-only in the local view.
+
+A file is listed as skipped for an instance-level reason (suppressed, envelope) only when no other instance of the same file can be used.
 
 Lightweight components are resolved before processing.
 
@@ -95,12 +97,11 @@ The user can **Cancel** at any step up to 7. Nothing is written or deleted in an
 
 **Exceptions list** (only with *Apply to all parts, with exceptions*):
 
-- A list of all collected parts with three columns: tick box *Exception*, *Part* (file name, plus sub-assembly path in grey), *Material*.
-- Every row starts unticked, showing the common material in grey.
-- Ticking a row makes its *Material* cell editable; the user types that part's material.
-- To give several parts the same different material at once: tick them, type the value in **Material for ticked parts** and click **Set**.
+- A list of all collected parts with a tick box and three columns: *Part*, *In sub-assembly*, *Material*. Parts without an exception show `(all: <common material>)`.
+- Tick one or more parts, type the value in **Material for ticked parts** and click **Set**. Repeat for other groups with other materials.
+- **Reset to common** removes the exception from the ticked parts; **Untick all** clears the ticks.
 - Clicking a row selects/highlights that component in the SOLIDWORKS graphics area so the user can see which part it is.
-- A ticked row with an empty *Material* is not allowed with **Next**.
+- Going back and choosing *Apply to all parts* clears all exceptions.
 - Buttons: **Next**, **Back**, **Cancel**.
 
 Result: unticked parts get the common material; ticked parts get their own value.
@@ -120,7 +121,7 @@ Shown once for every collected part, in tree order – only if `DESCRIPTION` is 
 - Caption: *Part `n` of `N`*
 - Shows: part file name, full path, configuration in use.
 - The part is selected and zoomed to (`ModelDocExtension.SelectByID2` + *Zoom to Selection*) so the user sees it while typing. The view is restored afterwards.
-- Text box **DESCRIPTION** – only if `DESCRIPTION` is ticked. Pre-filled with the part's existing `DESCRIPTION` value, if any.
+- Text box **DESCRIPTION** – only if `DESCRIPTION` is ticked. Pre-filled with the part's existing `DESCRIPTION` value, if any. An empty box keeps the existing value (same as Skip).
 - Text box **Size** – only if Size is *Type per part*. Pre-filled with the part's existing `Size` value, or `-` if there is none.
 - Buttons:
   - **Next** – store the values and go to the next part.
@@ -154,7 +155,7 @@ After writing, the value is read back with `Get6` and the resolved value is comp
 - Only with *Delete all existing custom properties first*.
 - For each processed part: read all names with `CustomPropertyManager("").GetNames`, delete each with `Delete2`. The *Configuration Specific* tab is not touched.
 - Every deleted property (name, type, value/expression) is written to the log first, so it can be re-entered by hand if needed.
-- Deletion and writing happen on the same open document, before one save. If writing fails, the part is closed **without saving**, so its old properties stay on disk.
+- Deletion and writing happen in memory, before one save. If any write fails, the deleted properties are put back and the part is **not saved**, so its file on disk is unchanged.
 
 ### 5.1 DESCRIPTION
 - Type: `swCustomInfoText`.
@@ -167,21 +168,21 @@ After writing, the value is read back with `Get6` and the resolved value is comp
 
 ### 5.3 Weight
 - Added **automatically to every part**, if ticked. No dialog.
-- Type: **Equation** (the *Equation* type shown in the Custom Properties tab, SOLIDWORKS 2020+).
-  If the installed API does not expose the equation type constant, fall back to `swCustomInfoText` with the same expression – SOLIDWORKS still evaluates a linked text expression.
+- Type: equation written as a text expression. The SOLIDWORKS API has no separate *Equation* member in `swCustomInfoType_e`, so the expression is written with `swCustomInfoText`; SOLIDWORKS evaluates the linked value.
 - Text expression: `"SW-Mass@<PartFileName>.SLDPRT"` — e.g. `"SW-Mass@Bracket.SLDPRT"`.
   This is a live link: the value updates whenever the part changes.
-- **Units – must be kg.** `SW-Mass` is reported in the part's *mass-property* unit (Tools > Options > Document Properties > Units > Mass). The macro reads that unit per part (`swUnitsMassPropMass`) and:
+- **Units – must be kg.** `SW-Mass` is shown in the part's *mass-property* unit (Tools > Options > Document Properties > Units > Mass). The macro finds that unit by comparing the resolved `SW-Mass` with the real mass from `MassProperty.Mass` (always kg), then writes:
   | Part mass unit | Expression written |
   |---|---|
   | kg | `"SW-Mass@Part.SLDPRT"` |
-  | g | `"SW-Mass@Part.SLDPRT" / 1000` |
-  | lb | `"SW-Mass@Part.SLDPRT" * 0.45359237` |
-  | other | warn in Review, write the plain link |
-
-  Alternative (option on the Review screen, default **off**): *Set part mass unit to kg* – changes each part's mass unit to kg and always writes the plain link. This changes a document setting, so it is opt-in.
+  | g | `"SW-Mass@Part.SLDPRT"/1000` |
+  | mg | `"SW-Mass@Part.SLDPRT"/1000000` |
+  | lb | `"SW-Mass@Part.SLDPRT"*0.45359237` |
+  | oz | `"SW-Mass@Part.SLDPRT"*0.028349523125` |
+- The written expression is read back and its resolved value is checked against the real mass in kg. If the plain form does not evaluate, the `=` form (`="SW-Mass@Part.SLDPRT"/1000`) is tried.
+- If neither form evaluates, the plain link is kept and the log warns that this part shows its own unit and that its mass unit should be set to kilograms. The macro does not change document unit settings.
+- If the part's mass is 0 (no material), the plain link is written and the log says the unit could not be checked.
 - Decimal places follow the part's mass-unit decimal setting.
-- **To verify during implementation:** that an Equation-type property accepts arithmetic on a linked `SW-Mass` value on the minimum supported SOLIDWORKS version. If it does not, the default becomes the *Set part mass unit to kg* behaviour, with a confirmation prompt.
 
 ### 5.4 Size
 - Type: `swCustomInfoText`.
@@ -190,9 +191,8 @@ After writing, the value is read back with `Get6` and the resolved value is comp
 
 ## 6. Writing and saving
 
-- Each part is opened (or taken from memory if already loaded) with `OpenDoc6`, silently.
-- Old properties are deleted (if chosen), the new ones written, then the part is saved with `Save3(swSaveAsOptions_Silent)`.
-- Parts the macro opened itself are closed afterwards; parts that were already open stay open.
+- Each part is taken from the assembly's memory (`Component2.GetModelDoc2`); no extra windows are opened or closed.
+- Old properties are deleted (if chosen), the new ones written and read back, then the part is saved with `Save3(swSaveAsOptions_Silent)`.
 - The top assembly is rebuilt at the end so the BOM refreshes. It is **not** saved automatically (it was not changed).
 - A failure on one part (open, delete, write, verify or save) is logged and the macro continues with the next part.
 

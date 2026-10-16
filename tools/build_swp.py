@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Build dist/SafeRename.swp (a SOLIDWORKS VBA macro file) from the sources in src/.
+Build the SOLIDWORKS VBA macro files in dist/ from the sources in src/:
+dist/SafeRename.swp and dist/AddPartProperties.swp.
 
 A .swp file is an OLE compound file (MS-CFB) holding a VBA project (MS-OVBA)
 inside an "APC" host storage written by SOLIDWORKS:
@@ -13,12 +14,12 @@ inside an "APC" host storage written by SOLIDWORKS:
         VBA Project Signature            "
         _VBA_Project/
           PROJECT, PROJECTwm             project text streams
-          frmSafeRename/                 UserForm designer (CompObj, VBFrame, f, o)
+          <form>/                        UserForm designer (CompObj, VBFrame, f, o)
           VBA/
             _VBA_PROJECT                 7-byte header, no p-code (see below)
             dir                          compressed module/reference directory
-            ThisLibrary, SafeRename,     compressed module source
-            frmSafeRename
+            ThisLibrary, <module>,       compressed module source
+            <form>
 
 The project is written source-only: _VBA_PROJECT has Version 0xFFFF and no
 performance cache, as MS-OVBA 2.3.4.1 prescribes for writers. VBA therefore
@@ -28,7 +29,8 @@ The host streams and the project references (stdole, SldWorks, SwConst,
 MSForms) were taken from a macro saved by SOLIDWORKS: codestack.net
 "FreezeRebuild.swp" (https://github.com/xarial/codestack, MIT licence).
 
-Usage:  python3 tools/build_swp.py [output.swp]
+Usage:  python3 tools/build_swp.py                 build every macro into dist/
+        python3 tools/build_swp.py NAME [out.swp]  build one macro (SafeRename, AddPartProperties)
 """
 import os
 import struct
@@ -38,18 +40,33 @@ import uuid
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, "src")
 
-PROJECT_NAME = "SafeRename"
-MODULE_NAME = "SafeRename"
-FORM_NAME = "frmSafeRename"
+# One entry per macro: module = project name, form, form caption, design size of
+# the form in points (the code sets the real size at run time), and a fixed GUID
+# namespace so that every build of the same sources is byte-identical.
+MACROS = {
+    "SafeRename": dict(form="frmSafeRename", caption="Safe Rename", size=(618, 512),
+                       ns="6b7f3a52-0c1e-4b8e-9a51-5afe7e4a3e11"),
+    "AddPartProperties": dict(form="frmAddPartProperties", caption="Add Part Properties", size=(618, 460),
+                              ns="0d3c5a7e-41b2-4f0a-8c6d-a11d9a7e5b42"),
+}
 
-# Fixed GUIDs so that every build of the same sources is byte-identical.
-NS = uuid.UUID("6b7f3a52-0c1e-4b8e-9a51-5afe7e4a3e11")
-PROJECT_ID = "{%s}" % str(uuid.uuid5(NS, "project")).upper()
-FORM_CLSID = "{%s}" % str(uuid.uuid5(NS, "form-clsid")).upper()
-FORM_TYPELIB = "{%s}" % str(uuid.uuid5(NS, "form-typelib")).upper()
+PROJECT_NAME = MODULE_NAME = FORM_NAME = FORM_CAPTION = None
+PROJECT_ID = FORM_CLSID = FORM_TYPELIB = None
+FORM_W_PT = FORM_H_PT = None
 
-# Design size of the form (the code sets the real size at run time).
-FORM_W_PT, FORM_H_PT = 618, 512
+
+def configure(name):
+    """Select the macro that the functions below build."""
+    global PROJECT_NAME, MODULE_NAME, FORM_NAME, FORM_CAPTION
+    global PROJECT_ID, FORM_CLSID, FORM_TYPELIB, FORM_W_PT, FORM_H_PT
+    m = MACROS[name]
+    PROJECT_NAME = MODULE_NAME = name
+    FORM_NAME, FORM_CAPTION = m["form"], m["caption"]
+    FORM_W_PT, FORM_H_PT = m["size"]
+    ns = uuid.UUID(m["ns"])
+    PROJECT_ID = "{%s}" % str(uuid.uuid5(ns, "project")).upper()
+    FORM_CLSID = "{%s}" % str(uuid.uuid5(ns, "form-clsid")).upper()
+    FORM_TYPELIB = "{%s}" % str(uuid.uuid5(ns, "form-typelib")).upper()
 
 # ---------------------------------------------------------------------------
 # Data copied from a SOLIDWORKS-saved macro
@@ -300,14 +317,14 @@ def form_streams():
     vbframe = (
         "VERSION 5.00\r\n"
         "Begin {C62A69F0-16DC-11CE-9E98-00AA00574A4F} %s \r\n"
-        '   Caption         =   "Safe Rename"\r\n'
+        '   Caption         =   "%s"\r\n'
         "   ClientHeight    =   %d\r\n"
         "   ClientLeft      =   108\r\n"
         "   ClientTop       =   432\r\n"
         "   ClientWidth     =   %d\r\n"
         "   StartUpPosition =   1  'CenterOwner\r\n"
         "   TypeInfoVer     =   1\r\n"
-        "End\r\n") % (FORM_NAME, tw(FORM_H_PT), tw(FORM_W_PT))
+        "End\r\n") % (FORM_NAME, FORM_CAPTION, tw(FORM_H_PT), tw(FORM_W_PT))
     # MS-OFORMS 2.2.10 FormControl without child controls.
     prop_mask = (1 << 3) | (1 << 10) | (1 << 11) | (1 << 26) | (1 << 27)
     data_block = struct.pack("<IIi", 0, 0, 32000)            # NextAvailableID, ShapeCookie, DrawBuffer
@@ -330,9 +347,9 @@ def read_source(path):
 
 
 def build_tree():
-    module_src = read_source(os.path.join(SRC, "SafeRename.bas"))
+    module_src = read_source(os.path.join(SRC, MODULE_NAME + ".bas"))
     if not module_src.startswith('Attribute VB_Name = "%s"' % MODULE_NAME):
-        raise SystemExit("SafeRename.bas must start with Attribute VB_Name")
+        raise SystemExit("%s.bas must start with Attribute VB_Name" % MODULE_NAME)
     form_header = (
         'Attribute VB_Name = "%s"\r\n'
         'Attribute VB_Base = "0%s%s"\r\n'
@@ -504,11 +521,23 @@ def write_cfb(tree, path):
             fh.write(s)
 
 
-def main():
-    out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "dist", "SafeRename.swp")
+def build(name, out=None):
+    configure(name)
+    out = out or os.path.join(ROOT, "dist", name + ".swp")
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     write_cfb(build_tree(), out)
     print("wrote", out, os.path.getsize(out), "bytes")
+
+
+def main():
+    args = sys.argv[1:]
+    if not args:
+        for name in MACROS:
+            build(name)
+    elif args[0] in MACROS:
+        build(args[0], args[1] if len(args) > 1 else None)
+    else:
+        raise SystemExit("usage: build_swp.py [%s [out.swp]]" % "|".join(MACROS))
 
 
 if __name__ == "__main__":
