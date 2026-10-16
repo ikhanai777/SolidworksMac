@@ -1,10 +1,9 @@
-Attribute VB_Name = "AddPartProperties"
 '===============================================================================
-' AddPartProperties.bas  -  SOLIDWORKS VBA macro (engine + entry point)
+' AddPartProperties.bas  -  SOLIDWORKS VBA macro, single module, no UserForm
 '
 ' Adds the custom properties DESCRIPTION, Material, Weight and Size to every
-' part used in the active assembly (sub-assemblies included). The wizard lives
-' in the frmAddPartProperties UserForm; this module does the work.
+' part used in the active assembly (sub-assemblies included). All questions
+' are asked with InputBox / MsgBox.
 '
 '   - Only local part files in the assembly's folder (and its sub-folders) are
 '     changed. Virtual components, PDM files, read-only files, Toolbox parts,
@@ -15,50 +14,57 @@ Attribute VB_Name = "AddPartProperties"
 '   - Optionally all old properties on the Custom tab are deleted first. They
 '     are logged, and restored if writing the part fails.
 '
+' Install: Tools > Macro > New, save as AddPartProperties.swp. In the VBA editor
+' select all the code of the new module, delete it and paste this whole file
+' (or File > Import File... this .bas). Then run main.
+' Late bound: no extra references are needed.
+'
 ' See docs/AddPartProperties-spec.md.
 '===============================================================================
 Option Explicit
 
+Private Const TITLE As String = "Add Part Properties"
+
 '------------------------------ property names ---------------------------------
-Public Const PROP_DESC As String = "DESCRIPTION"
-Public Const PROP_MAT As String = "Material"
-Public Const PROP_WEIGHT As String = "Weight"
-Public Const PROP_SIZE As String = "Size"
+Private Const PROP_DESC As String = "DESCRIPTION"
+Private Const PROP_MAT As String = "Material"
+Private Const PROP_WEIGHT As String = "Weight"
+Private Const PROP_SIZE As String = "Size"
 
-'------------------------------ options (set by the wizard) --------------------
-Public Opt_AddDesc As Boolean
-Public Opt_AddMat As Boolean
-Public Opt_AddWeight As Boolean
-Public Opt_AddSize As Boolean
-Public Opt_DeleteOld As Boolean         ' delete every Custom-tab property first
-Public Opt_Overwrite As Boolean         ' replace existing values (Keep mode only)
-Public Opt_Save As Boolean              ' save each part after writing
+'------------------------------ options (set by the dialogs) -------------------
+Private Opt_AddDesc As Boolean
+Private Opt_AddMat As Boolean
+Private Opt_AddWeight As Boolean
+Private Opt_AddSize As Boolean
+Private Opt_DeleteOld As Boolean        ' delete every Custom-tab property first
+Private Opt_Overwrite As Boolean        ' replace existing values (Keep mode only)
+Private Opt_Save As Boolean             ' save each part after writing
 
-Public MatCommon As String              ' material for all parts
-Public SizeSameForAll As Boolean        ' True: SizeAll for every part
-Public SizeAll As String
+Private MatCommon As String             ' material for all parts
+Private SizeSameForAll As Boolean       ' True: SizeAll for every part
+Private SizeAll As String
 
 '------------------------------ parts (1-based, PartCount entries) --------------
-Public PartCount As Long
-Public pPath() As String                ' full path of the part file
-Public pComp() As SldWorks.Component2   ' one instance in the top assembly
-Public pWhere() As String               ' sub-assembly path, for display
-Public pConfig() As String              ' referenced configuration
-Public pOldDesc() As String             ' existing values ("" = none)
-Public pOldMat() As String
-Public pOldSize() As String
-Public pHasDesc() As Boolean
-Public pHasMat() As Boolean
-Public pHasSize() As Boolean
-Public pHasWeight() As Boolean
-Public pPropCount() As Long             ' number of properties on the Custom tab
-Public pDesc() As String                ' value typed in the per-part dialog
-Public pDescSet() As Boolean            ' False = keep existing (Skip)
-Public pSize() As String
-Public pSizeSet() As Boolean
-Public pMatExc() As Boolean             ' True = exception, uses pMat
-Public pMat() As String
-Public pResult() As String              ' result after writing
+Private PartCount As Long
+Private pPath() As String               ' full path of the part file
+Private pComp() As Object               ' one instance (Component2) in the top assembly
+Private pWhere() As String              ' sub-assembly path, for display
+Private pConfig() As String             ' referenced configuration
+Private pOldDesc() As String            ' existing values ("" = none)
+Private pOldMat() As String
+Private pOldSize() As String
+Private pHasDesc() As Boolean
+Private pHasMat() As Boolean
+Private pHasSize() As Boolean
+Private pHasWeight() As Boolean
+Private pPropCount() As Long            ' number of properties on the Custom tab
+Private pDesc() As String               ' value typed for the part
+Private pDescSet() As Boolean           ' False = keep existing (skipped)
+Private pSize() As String
+Private pSizeSet() As Boolean
+Private pMatExc() As Boolean            ' True = exception, uses pMat
+Private pMat() As String
+Private pResult() As String             ' result after writing
 
 '------------------------------ API constants ----------------------------------
 Private Const swDocASSEMBLY As Long = 2
@@ -68,12 +74,13 @@ Private Const swComponentLightweight As Long = 1
 Private Const swComponentFullyResolved As Long = 2
 Private Const swComponentFullyLightweight As Long = 4
 Private Const swToolboxStandardPart As Long = 1
+Private Const CI_TEXT As Long = 30              ' swCustomInfoText
+Private Const CP_DELETE_AND_ADD As Long = 1     ' swCustomPropertyDeleteAndAdd
 Private Const ADD_OK As Long = 0                ' swCustomInfoAddResult_AddedOrChanged
 
 '------------------------------ shared state -----------------------------------
-Public swApp As SldWorks.SldWorks
-Public TopDoc As SldWorks.ModelDoc2     ' the active assembly
-Public gUI As Object                   ' the open wizard (receives progress)
+Private swApp As Object
+Private TopDoc As Object                ' the active assembly
 Private fso As Object
 Private logText As String
 Private skippedText As String
@@ -91,7 +98,7 @@ Sub main()
     InitEngine
     Set TopDoc = GetTopAssembly(problem)
     If TopDoc Is Nothing Then
-        MsgBox problem, vbExclamation, "Add Part Properties"
+        MsgBox problem, vbExclamation, TITLE
         Exit Sub
     End If
 
@@ -100,18 +107,38 @@ Sub main()
     SetStatus ""
     If PartCount = 0 Then
         MsgBox "No part in this assembly can be changed." & vbCrLf & vbCrLf & _
-               IIf(GetSkippedText() = "", "The assembly has no parts.", "Skipped:" & vbCrLf & Left$(GetSkippedText(), 1500)), _
-               vbExclamation, "Add Part Properties"
+               IIf(skippedText = "", "The assembly has no parts.", "Skipped:" & vbCrLf & Clip(skippedText, 800)), _
+               vbExclamation, TITLE
         Exit Sub
     End If
-    frmAddPartProperties.Show vbModeless
+
+    If Not AskProperties() Then Exit Sub
+    If Not AskDeleteOld() Then Exit Sub
+    If Not (Opt_AddDesc Or Opt_AddMat Or Opt_AddWeight Or Opt_AddSize Or Opt_DeleteOld) Then
+        MsgBox "Nothing to do: no property chosen and old properties are kept.", vbInformation, TITLE
+        Exit Sub
+    End If
+    If Opt_AddMat Then
+        If Not AskMaterial() Then Exit Sub
+    End If
+    If Opt_AddSize Then
+        If Not AskSize() Then Exit Sub
+    End If
+    If Opt_AddDesc Or (Opt_AddSize And Not SizeSameForAll) Then
+        If Not AskPerPart() Then Exit Sub
+    End If
+    If Not AskOverwrite() Then Exit Sub
+    If Not ConfirmSummary() Then Exit Sub
+
+    ApplyAll
 End Sub
 
-Public Sub InitEngine()
-    If swApp Is Nothing Then Set swApp = Application.SldWorks
+Private Sub InitEngine()
     Set fso = CreateObject("Scripting.FileSystemObject")
     Set pdmFolders = CreateObject("Scripting.Dictionary")
     pdmFolders.CompareMode = vbTextCompare
+    Set pdmVault = Nothing
+    pdmVaultTried = False
     logText = ""
     Opt_AddDesc = True
     Opt_AddMat = True
@@ -126,10 +153,397 @@ Public Sub InitEngine()
 End Sub
 
 '===============================================================================
+' Dialogs. Each returns False when the user cancels (nothing is changed then).
+'===============================================================================
+' 1. Which of the four properties to add.
+Private Function AskProperties() As Boolean
+    Dim prompt As String, ans As String
+    prompt = PartCount & " part file(s) found (each file once, sub-assemblies included)." & vbCrLf
+    If skippedCount > 0 Then prompt = prompt & skippedCount & " skipped:" & vbCrLf & Clip(skippedText, 300)
+    prompt = prompt & vbCrLf & "Which properties to add? Type their numbers:" & vbCrLf & _
+             "  1 = DESCRIPTION  (typed for each part)" & vbCrLf & _
+             "  2 = Material  (one value, with exceptions)" & vbCrLf & _
+             "  3 = Weight  (SW-Mass in kg, automatic)" & vbCrLf & _
+             "  4 = Size  (typed)" & vbCrLf & _
+             "1234 = all four.  0 = none (only delete old properties)."
+    Do
+        ans = InputBox(prompt, TITLE, "1234")
+        If StrPtr(ans) = 0 Then Exit Function
+        ans = Trim$(ans)
+        If ans <> "" And Not ans Like "*[!0-4 ,]*" Then Exit Do
+        MsgBox "Type digits 1 to 4, for example 1234 or 23. Type 0 for none.", vbExclamation, TITLE
+    Loop
+    Opt_AddDesc = InStr(ans, "1") > 0
+    Opt_AddMat = InStr(ans, "2") > 0
+    Opt_AddWeight = InStr(ans, "3") > 0
+    Opt_AddSize = InStr(ans, "4") > 0
+    AskProperties = True
+End Function
+
+' 2. Keep or delete the old Custom-tab properties.
+Private Function AskDeleteOld() As Boolean
+    Dim i As Long, n As Long, r As VbMsgBoxResult
+    For i = 1 To PartCount
+        If pPropCount(i) > 0 Then n = n + 1
+    Next i
+    If n = 0 Then
+        Opt_DeleteOld = False
+        AskDeleteOld = True
+        Exit Function
+    End If
+    r = MsgBox(n & " of the " & PartCount & " parts already have custom properties on the Custom tab." & vbCrLf & vbCrLf & _
+               "Delete ALL existing custom properties first?" & vbCrLf & vbCrLf & _
+               "Yes = delete all old properties, then add the chosen ones" & vbCrLf & _
+               "        (cannot be undone - the deleted values are written to the log)" & vbCrLf & _
+               "No = keep existing properties" & vbCrLf & _
+               "Cancel = stop" & vbCrLf & vbCrLf & _
+               "Configuration-specific properties are never changed.", _
+               vbYesNoCancel + vbQuestion + vbDefaultButton2, TITLE)
+    If r = vbCancel Then Exit Function
+    If r = vbYes Then
+        If MsgBox("All properties on the Custom tab of " & n & " part(s) will be DELETED." & vbCrLf & _
+                  "Are you sure?", vbOKCancel + vbExclamation + vbDefaultButton2, TITLE) <> vbOK Then Exit Function
+    End If
+    Opt_DeleteOld = (r = vbYes)
+    AskDeleteOld = True
+End Function
+
+' 3. Material: one value for all parts, optionally with exceptions.
+Private Function AskMaterial() As Boolean
+    Dim v As String, r As VbMsgBoxResult
+    Do
+        v = InputBox("Material for all parts (written as typed):", TITLE, MatCommon)
+        If StrPtr(v) = 0 Then Exit Function
+        v = Trim$(v)
+        If v <> "" Then Exit Do
+        MsgBox "Type the material for all parts.", vbExclamation, TITLE
+    Loop
+    MatCommon = v
+
+    r = MsgBox("Material = """ & MatCommon & """" & vbCrLf & vbCrLf & _
+               "Yes = apply to all " & PartCount & " parts" & vbCrLf & _
+               "No = apply to all parts, with exceptions (pick parts that get a different material)" & vbCrLf & _
+               "Cancel = stop", vbYesNoCancel + vbQuestion, TITLE)
+    If r = vbCancel Then Exit Function
+    If r = vbNo Then
+        If Not AskExceptions() Then Exit Function
+    End If
+    AskMaterial = True
+End Function
+
+' Lists the parts page by page; the user types the numbers of the exceptions,
+' then the material of each exception.
+Private Function AskExceptions() As Boolean
+    Const PER_PAGE As Long = 15
+    Dim pages As Long, pg As Long, first As Long, last As Long, i As Long
+    Dim prompt As String, ans As String, picked() As Boolean, nPicked As Long, bad As String
+
+    ReDim picked(1 To PartCount)
+    pages = (PartCount + PER_PAGE - 1) \ PER_PAGE
+    pg = 1
+    Do While pg <= pages
+        first = (pg - 1) * PER_PAGE + 1
+        last = first + PER_PAGE - 1
+        If last > PartCount Then last = PartCount
+        prompt = "Material exceptions - parts " & first & " to " & last & " of " & PartCount & ":" & vbCrLf
+        For i = first To last
+            prompt = prompt & IIf(picked(i), " *", "  ") & i & "  " & Clip(fso.GetFileName(pPath(i)), 40) & vbCrLf
+        Next i
+        prompt = Clip(prompt, 850) & vbCrLf & "Type the numbers of the parts with a different material " & _
+                 "(e.g. 3, 7, 9-11), or leave empty and press OK for the next page."
+        ans = InputBox(prompt, TITLE & " - page " & pg & " of " & pages, "")
+        If StrPtr(ans) = 0 Then Exit Function
+        bad = MarkNumbers(ans, picked)
+        If bad <> "" Then
+            MsgBox "Not understood: " & bad & vbCrLf & "Type part numbers like 3, 7, 9-11.", vbExclamation, TITLE
+        Else
+            pg = pg + 1
+        End If
+    Loop
+
+    Dim lastVal As String, n As Long, k As Long, v As String
+    For i = 1 To PartCount
+        If picked(i) Then nPicked = nPicked + 1
+    Next i
+    If nPicked = 0 Then
+        AskExceptions = True
+        Exit Function
+    End If
+
+    lastVal = MatCommon
+    For i = 1 To PartCount
+        If picked(i) Then
+            k = k + 1
+            SelectPart TopDoc, i, True
+            v = InputBox("Exception " & k & " of " & nPicked & ": " & fso.GetFileName(pPath(i)) & _
+                         IIf(pWhere(i) = "", "", vbCrLf & "In: " & pWhere(i)) & vbCrLf & vbCrLf & _
+                         "Material for this part (empty = use """ & MatCommon & """):", TITLE, lastVal)
+            If StrPtr(v) = 0 Then
+                EndSelection
+                Exit Function
+            End If
+            v = Trim$(v)
+            If v <> "" And v <> MatCommon Then
+                pMatExc(i) = True
+                pMat(i) = v
+                lastVal = v
+                n = n + 1
+            End If
+        End If
+    Next i
+    EndSelection
+    LogMsg n & " material exception(s)."
+    AskExceptions = True
+End Function
+
+' Marks the numbers in text ("3, 7 9-11") in picked(). Returns the parts it did
+' not understand ("" = all fine).
+Private Function MarkNumbers(ByVal text As String, picked() As Boolean) As String
+    Dim tokens() As String, t As String, k As Long, j As Long, dash As Long
+    Dim a As Long, b As Long, bad As String
+    text = Replace(Replace(text, ";", " "), ",", " ")
+    tokens = Split(Trim$(text), " ")
+    For k = LBound(tokens) To UBound(tokens)
+        t = Trim$(tokens(k))
+        If t <> "" Then
+            a = 0: b = 0
+            dash = InStr(t, "-")
+            If dash > 1 And dash < Len(t) Then
+                If IsDigits(Left$(t, dash - 1)) And IsDigits(Mid$(t, dash + 1)) Then
+                    a = CLng(Left$(t, dash - 1))
+                    b = CLng(Mid$(t, dash + 1))
+                End If
+            ElseIf IsDigits(t) Then
+                a = CLng(t)
+                b = a
+            End If
+            If a < 1 Or b < a Or b > UBound(picked) Then
+                bad = bad & " " & t
+            Else
+                For j = a To b
+                    picked(j) = True
+                Next j
+            End If
+        End If
+    Next k
+    MarkNumbers = Trim$(bad)
+End Function
+
+Private Function IsDigits(ByVal s As String) As Boolean
+    Dim k As Long
+    If s = "" Or Len(s) > 6 Then Exit Function
+    For k = 1 To Len(s)
+        If Mid$(s, k, 1) < "0" Or Mid$(s, k, 1) > "9" Then Exit Function
+    Next k
+    IsDigits = True
+End Function
+
+' 4. Size: same value for all parts, or typed per part.
+Private Function AskSize() As Boolean
+    Dim r As VbMsgBoxResult, v As String
+    r = MsgBox("Size" & vbCrLf & vbCrLf & _
+               "Yes = same value for all parts (default ""-"")" & vbCrLf & _
+               "No = type the size for each part" & vbCrLf & _
+               "Cancel = stop", vbYesNoCancel + vbQuestion, TITLE)
+    If r = vbCancel Then Exit Function
+    SizeSameForAll = (r = vbYes)
+    If SizeSameForAll Then
+        v = InputBox("Size for all parts:", TITLE, "-")
+        If StrPtr(v) = 0 Then Exit Function
+        SizeAll = Trim$(v)
+        If SizeAll = "" Then SizeAll = "-"
+    End If
+    AskSize = True
+End Function
+
+' 5. One question per part for DESCRIPTION (and Size when typed per part).
+'    Empty = keep the existing value, "<" = back, Cancel = skip the rest or stop.
+Private Function AskPerPart() As Boolean
+    Dim i As Long, act As String
+    i = 1
+    Do While i <= PartCount
+        SelectPart TopDoc, i, True
+        act = "next"
+        If Opt_AddDesc Then act = AskPartValue(i, PROP_DESC)
+        If act = "next" And Opt_AddSize And Not SizeSameForAll Then act = AskPartValue(i, PROP_SIZE)
+        Select Case act
+            Case "next": i = i + 1
+            Case "back": If i > 1 Then i = i - 1
+            Case "rest": Exit Do
+            Case "stop"
+                EndSelection
+                Exit Function
+        End Select
+    Loop
+    EndSelection
+    AskPerPart = True
+End Function
+
+' Asks one value of part i. Returns "next", "back", "rest" (skip remaining) or "stop".
+Private Function AskPartValue(ByVal i As Long, ByVal prop As String) As String
+    Dim prompt As String, cur As String, existing As String, has As Boolean, v As String, r As VbMsgBoxResult, j As Long
+    If prop = PROP_DESC Then
+        cur = pDesc(i): existing = pOldDesc(i): has = pHasDesc(i)
+    Else
+        cur = pSize(i): existing = pOldSize(i): has = pHasSize(i)
+    End If
+    prompt = "Part " & i & " of " & PartCount & ":  " & fso.GetFileName(pPath(i)) & vbCrLf & _
+             IIf(pWhere(i) = "", "", "In: " & pWhere(i) & vbCrLf) & _
+             "Configuration: " & pConfig(i) & vbCrLf & _
+             "Existing " & prop & ": " & IIf(has, """" & Clip(existing, 120) & """", "(none)") & vbCrLf & vbCrLf & _
+             "Type the " & prop & " and press OK." & vbCrLf & _
+             "Empty = keep the existing value.   < = back to the previous part." & vbCrLf & _
+             "Cancel = skip the remaining parts, or stop."
+    Do
+        v = InputBox(prompt, TITLE & " - " & prop, cur)
+        If StrPtr(v) <> 0 Then Exit Do
+        r = MsgBox("Yes = skip the remaining parts (keep their " & prop & ") and continue" & vbCrLf & _
+                   "No = stop the macro, nothing is changed" & vbCrLf & _
+                   "Cancel = back to this part", vbYesNoCancel + vbQuestion, TITLE)
+        If r = vbYes Then
+            For j = i To PartCount
+                KeepPart j
+            Next j
+            AskPartValue = "rest"
+            Exit Function
+        ElseIf r = vbNo Then
+            AskPartValue = "stop"
+            Exit Function
+        End If
+    Loop
+
+    v = Trim$(v)
+    If v = "<" Then
+        AskPartValue = "back"
+        Exit Function
+    End If
+    If prop = PROP_DESC Then
+        pDescSet(i) = (v <> "")
+        pDesc(i) = IIf(v = "", pOldDesc(i), v)
+    ElseIf v = "" Then
+        ' keep the existing size; a part without one gets "-"
+        pSizeSet(i) = Not pHasSize(i)
+        pSize(i) = IIf(pHasSize(i), pOldSize(i), "-")
+    Else
+        pSizeSet(i) = True
+        pSize(i) = v
+    End If
+    AskPartValue = "next"
+End Function
+
+Private Sub KeepPart(ByVal i As Long)
+    pDescSet(i) = False
+    pDesc(i) = pOldDesc(i)
+    pSizeSet(i) = False
+    pSize(i) = IIf(pHasSize(i), pOldSize(i), "-")
+End Sub
+
+' 6. Overwrite existing values? Only asked in Keep mode when there are any.
+Private Function AskOverwrite() As Boolean
+    Dim i As Long, n As Long, r As VbMsgBoxResult
+    AskOverwrite = True
+    Opt_Overwrite = True
+    If Opt_DeleteOld Then Exit Function
+    For i = 1 To PartCount
+        If (Opt_AddDesc And pDescSet(i) And pHasDesc(i)) Or (Opt_AddMat And pHasMat(i)) _
+           Or (Opt_AddSize And pHasSize(i)) Or (Opt_AddWeight And pHasWeight(i)) Then n = n + 1
+    Next i
+    If n = 0 Then Exit Function
+    r = MsgBox(n & " part(s) already have some of these properties." & vbCrLf & vbCrLf & _
+               "Yes = overwrite the existing values" & vbCrLf & _
+               "No = keep the existing values, only add missing properties" & vbCrLf & _
+               "Cancel = stop", vbYesNoCancel + vbQuestion, TITLE)
+    If r = vbCancel Then AskOverwrite = False
+    Opt_Overwrite = (r = vbYes)
+End Function
+
+' 7. Summary of what will be written; OK writes.
+Private Function ConfirmSummary() As Boolean
+    Dim s As String, i As Long, shown As Long, ln As String
+    Const MAX_LINES As Long = 12
+
+    s = "Write to " & PartCount & " part(s) and save them?" & vbCrLf
+    If Opt_DeleteOld Then s = s & "ALL old Custom-tab properties are deleted first." & vbCrLf
+    s = s & "Add: " & IIf(Opt_AddDesc, PROP_DESC & "  ", "") & IIf(Opt_AddMat, PROP_MAT & "  ", "") & _
+            IIf(Opt_AddWeight, PROP_WEIGHT & " (kg)  ", "") & IIf(Opt_AddSize, PROP_SIZE, "") & vbCrLf
+    If Not Opt_DeleteOld Then s = s & "Existing values: " & IIf(Opt_Overwrite, "overwritten", "kept") & vbCrLf
+    s = s & vbCrLf
+
+    For i = 1 To PartCount
+        If shown >= MAX_LINES Then
+            s = s & "... and " & (PartCount - shown) & " more (all listed in the log)" & vbCrLf
+            Exit For
+        End If
+        ln = Clip(fso.GetFileName(pPath(i)), 30) & ":"
+        If Opt_AddDesc Then ln = ln & "  D=" & Clip(PlannedText(i, PROP_DESC), 25)
+        If Opt_AddMat Then ln = ln & "  M=" & Clip(PlannedText(i, PROP_MAT), 15)
+        If Opt_AddSize Then ln = ln & "  S=" & Clip(PlannedText(i, PROP_SIZE), 12)
+        s = s & ln & vbCrLf
+        shown = shown + 1
+    Next i
+
+    LogMsg ""
+    LogMsg "Planned:"
+    For i = 1 To PartCount
+        LogMsg "  " & fso.GetFileName(pPath(i)) & " | " & PROP_DESC & ": " & PlannedText(i, PROP_DESC) & _
+               " | " & PROP_MAT & ": " & PlannedText(i, PROP_MAT) & " | " & PROP_WEIGHT & ": " & PlannedText(i, PROP_WEIGHT) & _
+               " | " & PROP_SIZE & ": " & PlannedText(i, PROP_SIZE) & " | " & PlannedNote(i)
+    Next i
+
+    ConfirmSummary = (MsgBox(Clip(s, 1000), vbOKCancel + IIf(Opt_DeleteOld, vbExclamation, vbQuestion), TITLE) = vbOK)
+End Function
+
+' 8. Write every part, rebuild, save the log, report.
+Private Sub ApplyAll()
+    Dim i As Long, okCount As Long, failCount As Long, logPath As String, fails As String
+
+    LogMsg ""
+    LogMsg "Started " & Now
+    LogMsg "Add: " & IIf(Opt_AddDesc, PROP_DESC & " ", "") & IIf(Opt_AddMat, PROP_MAT & " ", "") & _
+           IIf(Opt_AddWeight, PROP_WEIGHT & " ", "") & IIf(Opt_AddSize, PROP_SIZE, "") & _
+           " | old properties: " & IIf(Opt_DeleteOld, "DELETE", "keep") & _
+           " | overwrite: " & Opt_Overwrite & " | save: " & Opt_Save
+    For i = 1 To PartCount
+        SetStatus "Writing " & fso.GetFileName(pPath(i)) & "  (" & i & " / " & PartCount & ")"
+        If WritePart(i) Then
+            okCount = okCount + 1
+        Else
+            failCount = failCount + 1
+            fails = fails & "  - " & fso.GetFileName(pPath(i)) & ": " & pResult(i) & vbCrLf
+        End If
+    Next i
+    SetStatus ""
+
+    On Error Resume Next
+    TopDoc.EditRebuild3                 ' refresh the BOM
+    On Error GoTo 0
+    LogMsg ""
+    LogMsg "Finished " & Now & ": " & okCount & " updated, " & failCount & " failed, " & skippedCount & " skipped."
+    logPath = SaveLog(TopDoc)
+
+    If MsgBox(okCount & " part(s) updated, " & failCount & " failed, " & skippedCount & " skipped." & vbCrLf & _
+              IIf(fails = "", "", vbCrLf & "Failed:" & vbCrLf & Clip(fails, 500)) & _
+              IIf(logPath = "", "", vbCrLf & "Log: " & logPath & vbCrLf & vbCrLf & "Open the log?"), _
+              IIf(failCount > 0, vbExclamation, vbInformation) + IIf(logPath = "", vbOKOnly, vbYesNo), TITLE) = vbYes Then
+        Shell "notepad.exe """ & logPath & """", vbNormalFocus
+    End If
+End Sub
+
+Private Sub EndSelection()
+    On Error Resume Next
+    TopDoc.ClearSelection2 True
+    TopDoc.ViewZoomtofit2
+End Sub
+
+Private Function Clip(ByVal s As String, ByVal n As Long) As String
+    If Len(s) > n Then Clip = Left$(s, n - 3) & "..." Else Clip = s
+End Function
+
+'===============================================================================
 ' Active assembly and its parts
 '===============================================================================
-Public Function GetTopAssembly(ByRef problem As String) As SldWorks.ModelDoc2
-    Dim m As SldWorks.ModelDoc2
+Private Function GetTopAssembly(ByRef problem As String) As Object
+    Dim m As Object
     problem = ""
     Set m = swApp.ActiveDoc
     If m Is Nothing Then
@@ -144,9 +558,9 @@ Public Function GetTopAssembly(ByRef problem As String) As SldWorks.ModelDoc2
 End Function
 
 ' Fills the p...() arrays with every part file that will be processed.
-Public Sub CollectParts(topModel As SldWorks.ModelDoc2)
-    Dim seen As Object, pending As Object, vComps As Variant, k As Long, c As SldWorks.Component2
-    Dim p As String, asmFolder As String, reason As String, doc As SldWorks.ModelDoc2
+Private Sub CollectParts(topModel As Object)
+    Dim seen As Object, pending As Object, vComps As Variant, k As Long, c As Object
+    Dim p As String, asmFolder As String, reason As String, doc As Object
 
     PartCount = 0
     skippedText = ""
@@ -159,7 +573,7 @@ Public Sub CollectParts(topModel As SldWorks.ModelDoc2)
     LogMsg "Assembly: " & topModel.GetPathName
     LogMsg "Folder:   " & asmFolder
 
-    Dim swAssy As SldWorks.AssemblyDoc
+    Dim swAssy As Object
     Set swAssy = topModel
     vComps = swAssy.GetComponents(False)            ' all levels
     If Not IsArray(vComps) Then Exit Sub
@@ -211,7 +625,7 @@ Public Sub CollectParts(topModel As SldWorks.ModelDoc2)
 End Sub
 
 ' Why this instance cannot be used, or "".
-Private Function InstanceSkipReason(c As SldWorks.Component2) As String
+Private Function InstanceSkipReason(c As Object) As String
     If c.IsVirtual Then
         InstanceSkipReason = "virtual component"
     ElseIf c.GetSuppression2 = swComponentSuppressed Then
@@ -234,8 +648,8 @@ Private Function SkipReason(ByVal p As String, ByVal asmFolder As String) As Str
     End If
 End Function
 
-Private Sub AddPart(c As SldWorks.Component2, ByVal p As String, doc As SldWorks.ModelDoc2)
-    Dim i As Long, cpm As SldWorks.CustomPropertyManager, names As Variant
+Private Sub AddPart(c As Object, ByVal p As String, doc As Object)
+    Dim i As Long, cpm As Object, names As Variant
     PartCount = PartCount + 1
     i = PartCount
     ReDim Preserve pPath(1 To i): ReDim Preserve pComp(1 To i)
@@ -277,17 +691,9 @@ Private Sub Skip(ByVal compName As String, ByVal p As String, ByVal reason As St
     LogMsg "Skipped " & IIf(p = "", compName, p) & ": " & reason
 End Sub
 
-Public Function GetSkippedText() As String
-    GetSkippedText = skippedText
-End Function
-
-Public Function GetSkippedCount() As Long
-    GetSkippedCount = skippedCount
-End Function
-
 ' "SubAsm-1 / SubSub-1" for a part inside sub-assemblies, "" at top level.
-Private Function ParentPath(c As SldWorks.Component2) As String
-    Dim parent As SldWorks.Component2, s As String
+Private Function ParentPath(c As Object) As String
+    Dim parent As Object, s As String
     Set parent = c.GetParent
     Do While Not parent Is Nothing
         s = parent.Name2 & IIf(s = "", "", " / " & s)
@@ -299,7 +705,7 @@ End Function
 '===============================================================================
 ' Skip tests
 '===============================================================================
-Private Function IsEnvelope(c As SldWorks.Component2) As Boolean
+Private Function IsEnvelope(c As Object) As Boolean
     On Error Resume Next
     IsEnvelope = c.IsEnvelope
 End Function
@@ -309,12 +715,12 @@ Private Function IsReadOnlyFile(ByVal path As String) As Boolean
     IsReadOnlyFile = (fso.GetFile(path).Attributes And 1) <> 0
 End Function
 
-Private Function IsReadOnlyDoc(doc As SldWorks.ModelDoc2) As Boolean
+Private Function IsReadOnlyDoc(doc As Object) As Boolean
     On Error Resume Next
     IsReadOnlyDoc = doc.IsOpenedReadOnly Or doc.IsOpenedViewOnly
 End Function
 
-Private Function ToolboxType(doc As SldWorks.ModelDoc2) As Long
+Private Function ToolboxType(doc As Object) As Long
     Dim ext As Object
     On Error Resume Next
     Set ext = doc.Extension                 ' late bound: compiles on every version
@@ -366,11 +772,11 @@ Private Function IsPdmFolder(ByVal folder As String) As Boolean
 End Function
 
 '===============================================================================
-' Planned values (shown in the Review page)
+' Planned values (shown in the summary before writing)
 '===============================================================================
 ' What will happen to property prop of part i. Returns the text for the Review
-' table: the value to write, "(unchanged)", "(kept: ...)", "(deleted)" or "".
-Public Function PlannedText(ByVal i As Long, ByVal prop As String) As String
+' summary: the value to write, "(unchanged)", "(kept: ...)", "(deleted)" or "".
+Private Function PlannedText(ByVal i As Long, ByVal prop As String) As String
     Dim ticked As Boolean, has As Boolean, oldVal As String, newVal As String, writes As Boolean
     Select Case prop
         Case PROP_DESC
@@ -398,7 +804,7 @@ Public Function PlannedText(ByVal i As Long, ByVal prop As String) As String
     End If
 End Function
 
-Public Function PlannedNote(ByVal i As Long) As String
+Private Function PlannedNote(ByVal i As Long) As String
     Dim n As Long, s As String
     If Opt_DeleteOld Then
         n = pPropCount(i)
@@ -412,7 +818,7 @@ Public Function PlannedNote(ByVal i As Long) As String
     PlannedNote = s
 End Function
 
-Public Function MaterialFor(ByVal i As Long) As String
+Private Function MaterialFor(ByVal i As Long) As String
     MaterialFor = IIf(pMatExc(i), pMat(i), MatCommon)
 End Function
 
@@ -431,8 +837,8 @@ End Function
 '===============================================================================
 ' Write one part. Returns True when everything was written (and saved).
 '===============================================================================
-Public Function WritePart(ByVal i As Long) As Boolean
-    Dim doc As SldWorks.ModelDoc2, cpm As SldWorks.CustomPropertyManager
+Private Function WritePart(ByVal i As Long) As Boolean
+    Dim doc As Object, cpm As Object
     Dim ok As Boolean, writes As Boolean, v As String
     Dim delNames() As String, delTypes() As Long, delVals() As String, delCount As Long
 
@@ -501,7 +907,7 @@ Public Function WritePart(ByVal i As Long) As Boolean
                 Next k
             End If
             For k = 1 To delCount
-                cpm.Add3 delNames(k), delTypes(k), delVals(k), swCustomPropertyDeleteAndAdd
+                cpm.Add3 delNames(k), delTypes(k), delVals(k), CP_DELETE_AND_ADD
             Next k
             LogMsg "  Old properties restored. The part was not saved."
         End If
@@ -526,7 +932,7 @@ Public Function WritePart(ByVal i As Long) As Boolean
 End Function
 
 ' False (and logged) when the property exists and must be kept.
-Private Function CanWrite(cpm As SldWorks.CustomPropertyManager, ByVal prop As String) As Boolean
+Private Function CanWrite(cpm As Object, ByVal prop As String) As Boolean
     If Opt_DeleteOld Or Opt_Overwrite Then
         CanWrite = True
     ElseIf ReadProp(cpm, prop, "") Then
@@ -537,10 +943,10 @@ Private Function CanWrite(cpm As SldWorks.CustomPropertyManager, ByVal prop As S
 End Function
 
 ' Writes a Text property and reads it back.
-Private Function SetText(cpm As SldWorks.CustomPropertyManager, ByVal prop As String, ByVal value As String) As Boolean
+Private Function SetText(cpm As Object, ByVal prop As String, ByVal value As String) As Boolean
     Dim rc As Long, back As String
     value = Trim$(value)
-    rc = cpm.Add3(prop, swCustomInfoText, value, swCustomPropertyDeleteAndAdd)
+    rc = cpm.Add3(prop, CI_TEXT, value, CP_DELETE_AND_ADD)
     If rc <> ADD_OK Then
         LogMsg "  ERROR: " & prop & " could not be written (code " & rc & ")."
         Exit Function
@@ -562,7 +968,7 @@ End Function
 ' For a non-kg part an equation such as "SW-Mass@Part.SLDPRT"/1000 is written
 ' and checked; both the plain form and the "=" form of the equation are tried.
 '===============================================================================
-Private Function SetWeight(doc As SldWorks.ModelDoc2, cpm As SldWorks.CustomPropertyManager, ByVal path As String) As Boolean
+Private Function SetWeight(doc As Object, cpm As Object, ByVal path As String) As Boolean
     Dim link As String, massKg As Double, shown As String
     Dim factor As Double, unitName As String, op As String, candidates As Variant, k As Long, expr As String
 
@@ -611,9 +1017,9 @@ Private Function SetWeight(doc As SldWorks.ModelDoc2, cpm As SldWorks.CustomProp
     SetWeight = True
 End Function
 
-Private Function WriteWeight(cpm As SldWorks.CustomPropertyManager, ByVal expr As String) As Boolean
+Private Function WriteWeight(cpm As Object, ByVal expr As String) As Boolean
     Dim rc As Long
-    rc = cpm.Add3(PROP_WEIGHT, swCustomInfoText, expr, swCustomPropertyDeleteAndAdd)
+    rc = cpm.Add3(PROP_WEIGHT, CI_TEXT, expr, CP_DELETE_AND_ADD)
     If rc <> ADD_OK Then
         LogMsg "  ERROR: Weight could not be written (code " & rc & ")."
     Else
@@ -646,7 +1052,7 @@ Private Function IsClose(ByVal shown As Double, ByVal expected As Double, ByVal 
     IsClose = Abs(shown - expected) <= tol
 End Function
 
-Private Function RealMassKg(doc As SldWorks.ModelDoc2) As Double
+Private Function RealMassKg(doc As Object) As Double
     Dim ext As Object, mp As Object
     On Error Resume Next
     Set ext = doc.Extension
@@ -654,7 +1060,7 @@ Private Function RealMassKg(doc As SldWorks.ModelDoc2) As Double
     If Not mp Is Nothing Then RealMassKg = mp.Mass
 End Function
 
-Private Function ResolvedValue(cpm As SldWorks.CustomPropertyManager, ByVal prop As String) As String
+Private Function ResolvedValue(cpm As Object, ByVal prop As String) As String
     Dim raw As String, resolved As String, wasResolved As Boolean
     On Error Resume Next
     cpm.Get5 prop, False, raw, resolved, wasResolved
@@ -677,7 +1083,7 @@ End Function
 ' Helpers
 '===============================================================================
 ' Reads the raw value (text expression) of a property. Returns True if it exists.
-Private Function ReadProp(cpm As SldWorks.CustomPropertyManager, ByVal prop As String, ByRef value As String) As Boolean
+Private Function ReadProp(cpm As Object, ByVal prop As String, ByRef value As String) As Boolean
     Dim raw As String, resolved As String, wasResolved As Boolean, names As Variant, k As Long
     names = cpm.GetNames
     If Not IsArray(names) Then Exit Function
@@ -691,7 +1097,7 @@ Private Function ReadProp(cpm As SldWorks.CustomPropertyManager, ByVal prop As S
     Next k
 End Function
 
-Public Sub SelectPart(topModel As SldWorks.ModelDoc2, ByVal i As Long, ByVal zoom As Boolean)
+Private Sub SelectPart(topModel As Object, ByVal i As Long, ByVal zoom As Boolean)
     On Error Resume Next
     topModel.ClearSelection2 True
     If pComp(i).Select4(False, Nothing, False) Then
@@ -700,21 +1106,19 @@ Public Sub SelectPart(topModel As SldWorks.ModelDoc2, ByVal i As Long, ByVal zoo
     topModel.GraphicsRedraw2
 End Sub
 
-' fraction: 0..1 for the progress bar, negative = leave the bar as it is.
-Public Sub SetStatus(ByVal text As String, Optional ByVal fraction As Double = -1)
+Private Sub SetStatus(ByVal text As String)
     On Error Resume Next
     swApp.Frame.SetStatusBarText IIf(text = "", "", "Add Part Properties: " & text)
-    If Not gUI Is Nothing Then gUI.ShowProgress text, fraction
     DoEvents
 End Sub
 
-Public Sub LogMsg(ByVal text As String)
+Private Sub LogMsg(ByVal text As String)
     logText = logText & text & vbCrLf
     Debug.Print text
 End Sub
 
 ' Writes the log next to the top assembly. Returns its path ("" if not written).
-Public Function SaveLog(topModel As SldWorks.ModelDoc2) As String
+Private Function SaveLog(topModel As Object) As String
     If logText = "" Then Exit Function
     Dim p As String, ts As Object
     p = fso.BuildPath(fso.GetParentFolderName(topModel.GetPathName), _

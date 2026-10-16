@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Build the SOLIDWORKS VBA macro files in dist/ from the sources in src/:
-dist/SafeRename.swp and dist/AddPartProperties.swp.
+Build the SOLIDWORKS VBA macro files in dist/ from the sources in src/
+(currently dist/SafeRename.swp; AddPartProperties is shipped as a plain .bas).
 
 A .swp file is an OLE compound file (MS-CFB) holding a VBA project (MS-OVBA)
 inside an "APC" host storage written by SOLIDWORKS:
@@ -30,7 +30,7 @@ MSForms) were taken from a macro saved by SOLIDWORKS: codestack.net
 "FreezeRebuild.swp" (https://github.com/xarial/codestack, MIT licence).
 
 Usage:  python3 tools/build_swp.py                 build every macro into dist/
-        python3 tools/build_swp.py NAME [out.swp]  build one macro (SafeRename, AddPartProperties)
+        python3 tools/build_swp.py NAME [out.swp]  build one macro (SafeRename)
 """
 import os
 import struct
@@ -46,8 +46,6 @@ SRC = os.path.join(ROOT, "src")
 MACROS = {
     "SafeRename": dict(form="frmSafeRename", caption="Safe Rename", size=(618, 512),
                        ns="6b7f3a52-0c1e-4b8e-9a51-5afe7e4a3e11"),
-    "AddPartProperties": dict(form="frmAddPartProperties", caption="Add Part Properties", size=(618, 460),
-                              ns="0d3c5a7e-41b2-4f0a-8c6d-a11d9a7e5b42"),
 }
 
 PROJECT_NAME = MODULE_NAME = FORM_NAME = FORM_CAPTION = None

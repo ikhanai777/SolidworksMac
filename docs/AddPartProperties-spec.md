@@ -1,8 +1,8 @@
 # Spec – Add Part Properties macro
 
-**Status:** Implemented – `src/AddPartProperties.bas`, `src/frmAddPartProperties.vba`, built to `dist/AddPartProperties.swp`
-**Macro name:** `AddPartProperties.swp` (entry point `main`)
-**Target:** SOLIDWORKS 2020 or later, VBA macro, same build approach as `SafeRename` (`src/` + `tools/build_swp.py` → `dist/`)
+**Status:** Implemented as a single module, `src/AddPartProperties.bas` (no UserForm; questions use `InputBox` / `MsgBox`)
+**Macro:** `src/AddPartProperties.bas`, entry point `main`. Pasted or imported into a new SOLIDWORKS macro; late bound, so no extra references are needed.
+**Target:** SOLIDWORKS 2020 or later, VBA
 
 ## 1. Purpose
 
@@ -51,98 +51,83 @@ Lightweight components are resolved before processing.
 ## 3. Workflow
 
 ```
-Run macro
+Run macro (main)
  ├─ 1. Checks          active doc is a saved assembly; otherwise message and exit
  ├─ 2. Collect parts   walk the component tree, de-duplicate by file path, apply skip rules
- ├─ 3. Start dialog    which properties to add (4 tick boxes)
- │                     + delete old custom properties? (Keep / Delete all)
- ├─ 4. Material        (if ticked) type value once → All parts / All parts with exceptions
- ├─ 5. Size            (if ticked) Same value for all (default "-") / Type per part
- ├─ 6. Per-part dialog (if DESCRIPTION ticked, or Size "Type per part")
- ├─ 7. Review          summary table, user confirms
- ├─ 8. Write & save    delete old properties (if chosen), write properties, save each part
- └─ 9. Report          summary message + log file
+ ├─ 3. Properties      InputBox: which properties to add (digits 1-4)
+ ├─ 4. Old properties  MsgBox: keep or delete all (only if any part has properties)
+ ├─ 5. Material        (if chosen) InputBox value → MsgBox all parts / with exceptions
+ ├─ 6. Size            (if chosen) MsgBox same for all / per part → InputBox value
+ ├─ 7. Per part        (if DESCRIPTION, or Size per part) one InputBox per part and property
+ ├─ 8. Overwrite       MsgBox, only if some parts already have the properties (Keep mode)
+ ├─ 9. Summary         MsgBox OK / Cancel
+ ├─ 10. Write & save   delete old properties (if chosen), write, read back, save each part
+ └─ 11. Report         MsgBox with counts, log file, option to open the log
 ```
 
-Dialogs for properties that are not ticked in step 3 are not shown. Weight has no dialog of its own: if ticked, it is added to every part (§5.3).
+Questions for properties that are not chosen in step 3 are not asked. Weight has no question of its own (§5.3).
 
-The user can **Cancel** at any step up to 7. Nothing is written or deleted in any file before step 8.
+**Cancel** at any question up to step 9 stops the macro. Nothing is written or deleted in any file before step 10.
 
 ## 4. Dialogs
 
-### 4.1 Start dialog (step 3)
+All dialogs are standard `InputBox` / `MsgBox` windows, titled *Add Part Properties*.
 
-- Caption: *Add Part Properties*
-- Shows: assembly name and the number of parts found / skipped (with a *Show skipped* link that lists them and why).
-- **Properties to add** – four tick boxes, all ticked by default:
-  - `DESCRIPTION`
-  - `Material`
-  - `Weight`
-  - `Size`
-- **Old custom properties** – two option buttons:
-  - **Keep existing properties** (default) – other properties on the Custom tab stay as they are.
-  - **Delete all existing custom properties first** – every property on each part's Custom tab is deleted, then the ticked properties are added. A warning line is shown in red: *"All properties on the Custom tab of N parts will be deleted. This cannot be undone."*
-- Buttons: **Next**, **Cancel**.
-- **Next** is disabled when no property is ticked and *Keep existing* is selected (there would be nothing to do). Ticking nothing with *Delete all* is allowed: it only clears the Custom tab.
+### 4.1 Properties to add (step 3)
 
-### 4.2 Material (step 4)
+InputBox listing the number of parts found and the skipped ones (with reasons), and:
 
-- Caption: *Material*
-- Text box **Material for all parts** – empty; the user types the material as plain text.
-- Two option buttons:
-  - **Apply to all parts** (default) – every part gets this material.
-  - **Apply to all parts, with exceptions** – opens the exceptions list below.
-- Buttons: **Next**, **Back**, **Cancel**.
-- An empty value is not allowed with **Next**.
+```
+1 = DESCRIPTION  (typed for each part)
+2 = Material  (one value, with exceptions)
+3 = Weight  (SW-Mass in kg, automatic)
+4 = Size  (typed)
+1234 = all four.  0 = none (only delete old properties).
+```
 
-**Exceptions list** (only with *Apply to all parts, with exceptions*):
+Default `1234`. Anything other than the digits 0–4 (spaces and commas allowed) is asked again.
 
-- A list of all collected parts with a tick box and three columns: *Part*, *In sub-assembly*, *Material*. Parts without an exception show `(all: <common material>)`.
-- Tick one or more parts, type the value in **Material for ticked parts** and click **Set**. Repeat for other groups with other materials.
-- **Reset to common** removes the exception from the ticked parts; **Untick all** clears the ticks.
-- Clicking a row selects/highlights that component in the SOLIDWORKS graphics area so the user can see which part it is.
-- Going back and choosing *Apply to all parts* clears all exceptions.
-- Buttons: **Next**, **Back**, **Cancel**.
+### 4.2 Old custom properties (step 4)
 
-Result: unticked parts get the common material; ticked parts get their own value.
+Asked only when at least one part already has Custom-tab properties.
+MsgBox *Yes* = delete all existing custom properties first, *No* = keep (default), *Cancel* = stop. *Yes* is confirmed by a second warning (OK / Cancel, Cancel is the default). Choosing `0` in step 3 together with *No* means there is nothing to do; the macro says so and stops.
 
-### 4.3 Size (step 5)
+### 4.3 Material (step 5)
 
-- Caption: *Size*
-- Two option buttons:
-  - **Same value for all parts** (default) – text box pre-filled with `-`. The user can keep `-` or type another value.
-  - **Type per part** – Size is asked in the per-part dialog (§4.4).
-- Buttons: **Next**, **Back**, **Cancel**.
+1. InputBox *Material for all parts*. Empty is not accepted.
+2. MsgBox *Yes* = apply to all parts, *No* = with exceptions, *Cancel* = stop.
+3. Exceptions: the parts are listed in numbered pages of 15 (`1  Bracket.SLDPRT`, already picked parts marked `*`). The user types the numbers of the exceptions – e.g. `3, 7, 9-11` – or leaves the box empty for the next page. Invalid entries are reported and the page is asked again.
+4. For each picked part (highlighted and zoomed to in the graphics area) an InputBox asks its material. The default is the last exception material typed, so a group of parts with the same material only needs Enter. Empty (or the common material) = no exception.
 
-### 4.4 Per-part dialog (step 6)
+### 4.4 Size (step 6)
 
-Shown once for every collected part, in tree order – only if `DESCRIPTION` is ticked, or Size is *Type per part*.
+MsgBox *Yes* = same value for all parts, *No* = type per part, *Cancel* = stop. With *Yes* an InputBox asks the value, default `-` (empty = `-`).
 
-- Caption: *Part `n` of `N`*
-- Shows: part file name, full path, configuration in use.
-- The part is selected and zoomed to (`ModelDocExtension.SelectByID2` + *Zoom to Selection*) so the user sees it while typing. The view is restored afterwards.
-- Text box **DESCRIPTION** – only if `DESCRIPTION` is ticked. Pre-filled with the part's existing `DESCRIPTION` value, if any. An empty box keeps the existing value (same as Skip).
-- Text box **Size** – only if Size is *Type per part*. Pre-filled with the part's existing `Size` value, or `-` if there is none.
-- Buttons:
-  - **Next** – store the values and go to the next part.
-  - **Back** – previous part.
-  - **Skip** – keep this part's existing DESCRIPTION (and Size) as they are.
-  - **Skip remaining** – keep the existing values for all remaining parts and go to Review.
-  - **Cancel** – stop the macro, nothing written.
-- Enter = Next.
+### 4.5 Per part (step 7)
 
-With *Delete all existing custom properties first*, **Skip** still keeps the old value: the macro deletes the Custom tab and then writes the old value back for that property.
+For every part, in tree order, the part is selected and zoomed to, then one InputBox per property (DESCRIPTION, then Size when typed per part) shows:
 
-### 4.5 Review (step 7)
+- part number of total, file name, sub-assembly path, configuration;
+- the existing value of the property;
+- the text box pre-filled with the existing value (Size: `-` when there is none).
 
-A table, one row per part, columns: *Part*, *DESCRIPTION*, *Material*, *Weight*, *Size*, *Note*. Columns for unticked properties are hidden.
+Input:
+- a value + OK – store it;
+- empty + OK – keep the existing value (a part without a Size gets `-`);
+- `<` + OK – back to the previous part;
+- Cancel – a MsgBox: *Yes* = skip the remaining parts (keep their values) and continue, *No* = stop the macro, *Cancel* = back to this part.
 
-- Cells show the value that will be written, or `(unchanged)`.
-- *Note* shows warnings, e.g. "existing value will be overwritten", "5 other custom properties will be deleted".
-- With *Delete all existing custom properties first*, a red line above the table repeats how many properties on how many parts will be deleted.
-- Checkbox **Overwrite existing values** (default **on**) – shown only with *Keep existing properties*. When off, a property that already exists on a part is left as it is.
-- Checkbox **Save parts after writing** (default **on**).
-- Buttons: **Apply**, **Back**, **Cancel**.
+With *Delete all existing custom properties first*, a kept value is written back after the old properties are deleted.
+
+### 4.6 Overwrite (step 8)
+
+Only in Keep mode, and only when some parts already have one of the chosen properties: *Yes* = overwrite existing values, *No* = keep them and only add missing properties, *Cancel* = stop.
+
+### 4.7 Summary (step 9)
+
+MsgBox with what will be done (delete mode in capitals), the chosen properties, and the planned DESCRIPTION / Material / Size of the first 12 parts. The full plan for every part is written to the log. *OK* writes, *Cancel* stops.
+
+Parts are always saved after writing.
 
 ## 5. Property details
 
@@ -163,11 +148,11 @@ After writing, the value is read back with `Get6` and the resolved value is comp
 
 ### 5.2 Material
 - Type: `swCustomInfoText`.
-- Value: plain text typed by the user – the common material, or the part's own value if it was ticked as an exception.
+- Value: plain text typed by the user – the common material, or the part's own value if it was picked as an exception.
 - It is **not** linked to the SOLIDWORKS material (`SW-Material`) and does **not** change the material used for mass.
 
 ### 5.3 Weight
-- Added **automatically to every part**, if ticked. No dialog.
+- Added **automatically to every part**, if chosen. No question.
 - Type: equation written as a text expression. The SOLIDWORKS API has no separate *Equation* member in `swCustomInfoType_e`, so the expression is written with `swCustomInfoText`; SOLIDWORKS evaluates the linked value.
 - Text expression: `"SW-Mass@<PartFileName>.SLDPRT"` — e.g. `"SW-Mass@Bracket.SLDPRT"`.
   This is a live link: the value updates whenever the part changes.
@@ -205,27 +190,29 @@ After writing, the value is read back with `Get6` and the resolved value is comp
 
 | # | Setup | Expected |
 |---|---|---|
-| 1 | Run with a part document active | Message "Open an assembly first", nothing changed. |
-| 2 | Assembly with 3 parts, one used 4 times | Per-part dialog appears 3 times, not 6. |
+| 1 | Run with a part document active | Message "Open an assembly first...", nothing changed. |
+| 2 | Assembly with 3 parts, one used 4 times | DESCRIPTION is asked 3 times, not 6. |
 | 3 | Part inside a sub-assembly 2 levels deep, in the assembly folder | Part is processed; sub-assembly gets no properties. |
 | 4 | Part stored outside the assembly folder | Skipped, listed in *Show skipped* and the log, file unchanged. |
 | 5 | Virtual component | Skipped, not modified. |
 | 6 | Part checked in to PDM | Skipped, not modified. |
-| 7 | Start dialog: only `Weight` ticked | No Material, Size or per-part dialog; only `Weight` is written. |
-| 8 | Start dialog: nothing ticked, *Keep existing* | **Next** is disabled. |
-| 9 | Part with 5 old properties, *Delete all*, all 4 ticked | Custom tab has exactly the 4 properties; the 5 old ones are in the log. Configuration-specific properties unchanged. |
-| 10 | *Delete all*, Skip on a part with an existing DESCRIPTION | That DESCRIPTION is kept; other old properties are deleted. |
-| 11 | Material = `S355`, Apply to all | All parts show `Material = S355`. |
-| 12 | Material = `S355`, with exceptions: 2 of 5 parts ticked, typed `SS304` | 3 parts show `S355`, the 2 ticked show `SS304`. |
+| 7 | Properties: `3` (only Weight) | No Material, Size or per-part questions; only `Weight` is written. |
+| 8 | Properties: `0`, old properties: *No* (keep) | "Nothing to do" message, nothing changed. |
+| 9 | Part with 5 old properties, *Delete all*, all 4 chosen | Custom tab has exactly the 4 properties; the 5 old ones are in the log. Configuration-specific properties unchanged. |
+| 10 | *Delete all*, empty DESCRIPTION for a part that has one | That DESCRIPTION is kept; other old properties are deleted. |
+| 11 | Material = `S355`, *Yes* (all parts) | All parts show `Material = S355`. |
+| 12 | Material = `S355`, exceptions `2, 4`, typed `SS304` | 3 parts show `S355`, parts 2 and 4 show `SS304`. |
 | 13 | Part with mass unit kg, mass 2.5 kg | `Weight` evaluates to `2.5`. |
 | 14 | Part with mass unit g, mass 2500 g | `Weight` evaluates to `2.5`. |
 | 15 | Change part geometry after run, rebuild | `Weight` value updates. |
-| 16 | Size: Same value for all, keep default | Every part shows `Size = -`. |
-| 17 | Size: Type per part, type `PL 10` for one part | Size box appears in the per-part dialog; that part shows `PL 10`. |
-| 18 | Existing `DESCRIPTION`, *Keep existing*, Overwrite off | Existing value kept. |
-| 19 | Cancel in the 3rd per-part dialog | No file modified (check file dates). |
-| 20 | Toolbox fastener in the assembly | Not listed, not modified. |
-| 21 | Suppressed component | Not listed; reported as skipped. |
+| 16 | Size: *Yes* (same for all), keep default | Every part shows `Size = -`. |
+| 17 | Size: *No* (per part), type `PL 10` for one part | Size is asked for each part; that part shows `PL 10`. |
+| 18 | Existing `DESCRIPTION`, keep old properties, overwrite *No* | Existing value kept. |
+| 19 | Cancel in the 3rd part's DESCRIPTION, then *No* (stop) | No file modified (check file dates). |
+| 20 | `<` in part 3's DESCRIPTION | Part 2 is asked again. |
+| 21 | Exceptions page: type `x, 99` | "Not understood" message, the page is asked again. |
+| 22 | Toolbox fastener in the assembly | Not listed, not modified. |
+| 23 | Suppressed component | Not listed; reported as skipped. |
 
 ## 9. Decisions
 

@@ -3,7 +3,7 @@
 Two SOLIDWORKS macros:
 
 - **[Safe Rename](#safe-rename)** – rename parts and sub-assemblies without breaking references. [`dist/SafeRename.swp`](dist/SafeRename.swp)
-- **[Add Part Properties](#add-part-properties)** – add DESCRIPTION, Material, Weight (kg) and Size custom properties to every part in an assembly. [`dist/AddPartProperties.swp`](dist/AddPartProperties.swp)
+- **[Add Part Properties](#add-part-properties)** – add DESCRIPTION, Material, Weight (kg) and Size custom properties to every part in an assembly. [`src/AddPartProperties.bas`](src/AddPartProperties.bas)
 
 # Safe Rename
 
@@ -67,30 +67,39 @@ The dialog is modeless. You can keep selecting components in SOLIDWORKS while it
 
 # Add Part Properties
 
-A wizard that adds custom properties to every part used in the open assembly, sub-assemblies included. Full spec: [`docs/AddPartProperties-spec.md`](docs/AddPartProperties-spec.md).
-
-**Ready to run:** [`dist/AddPartProperties.swp`](dist/AddPartProperties.swp). Open the assembly (saved at least once), then **Tools > Macro > Run…** and pick `AddPartProperties.swp`.
+A macro that adds custom properties to every part used in the open assembly, sub-assemblies included. It is a single module, [`src/AddPartProperties.bas`](src/AddPartProperties.bas), with no UserForm: every question is a standard input box or message box. Full spec: [`docs/AddPartProperties-spec.md`](docs/AddPartProperties-spec.md).
 
 | Property | Value |
 |---|---|
 | `DESCRIPTION` | Typed for each part. Each part is highlighted and zoomed to while you type. |
-| `Material` | Typed once for all parts. Optionally pick exceptions and give them another material. |
+| `Material` | Typed once for all parts. Optionally pick exceptions by number (`3, 7, 9-11`) and give them another material. |
 | `Weight` | Automatic: `"SW-Mass@Part.SLDPRT"`, converted to kg when the part's mass unit is not kg, and checked against the real mass. |
 | `Size` | Typed: one value for all parts (default `-`) or one per part. |
 
-The wizard pages:
+## Install
 
-1. **What to do** – tick which of the four properties to add, and choose *Keep existing properties* or *Delete all existing custom properties first*. Shows how many parts are processed and which are skipped.
-2. **Material** – the material for all parts, and *Apply to all parts* or *with exceptions*.
-3. **Size** – same value for all, or type per part.
-4. **One page per part** – DESCRIPTION (and Size). *Skip this part* / *Skip remaining parts* keep the existing values.
-5. **Review** – a table of everything that will be written. *Overwrite existing values* and *Save parts after writing*. **Apply** writes, reads back and saves.
+1. In SOLIDWORKS: **Tools > Macro > New…**, save it as `AddPartProperties.swp` somewhere permanent.
+2. The VBA editor opens with a new module. Select all its code (Ctrl+A) and delete it.
+3. Paste the whole content of [`src/AddPartProperties.bas`](src/AddPartProperties.bas) (open it, *Raw*, Ctrl+A, Ctrl+C). Or delete the module and use **File > Import File…** on the downloaded `.bas`.
+4. **Save** and close the VBA editor.
 
-Nothing is written before **Apply**. A log `AddPartProperties_<date>_<time>.log` is written next to the assembly, including every deleted property.
+No references need to be ticked: the code is late bound.
+
+## Run it
+
+Open the assembly (saved at least once), then **Tools > Macro > Run…** and pick `AddPartProperties.swp` (method `main`). The questions:
+
+1. **Which properties** – type `1234` for all four, or e.g. `23` for Material and Weight. The box also shows how many parts were found and which are skipped.
+2. **Old properties** – *Yes* deletes all existing custom properties on the Custom tab first (confirmed again), *No* keeps them.
+3. **Material** – type it, then *Yes* = all parts, *No* = pick exceptions by number and type their material.
+4. **Size** – *Yes* = same value for all (default `-`), *No* = typed per part.
+5. **Each part** – DESCRIPTION (and Size). Empty = keep the existing value, `<` = previous part, *Cancel* = skip the remaining parts or stop.
+6. **Overwrite?** – only asked if some parts already have the properties.
+7. **Summary** – *OK* writes and saves the parts.
+
+Nothing is written before the summary's *OK*. A log `AddPartProperties_<date>_<time>.log` is written next to the assembly, including every deleted property.
 
 Only the **Custom** tab is changed. Each part file is processed once. These are skipped and listed: parts outside the assembly's folder, virtual components, PDM vault files, read-only files, Toolbox parts, suppressed and envelope components.
-
-To build it by hand, follow the Safe Rename steps below with `src/AddPartProperties.bas` and a UserForm named `frmAddPartProperties` (code from `src/frmAddPartProperties.vba`).
 
 ## Repository layout
 
@@ -98,13 +107,12 @@ To build it by hand, follow the Safe Rename steps below with `src/AddPartPropert
 |---|---|
 | `src/SafeRename.bas` | Engine and entry point (`main`) |
 | `src/frmSafeRename.vba` | Dialog code. Controls are built at run time. |
-| `src/AddPartProperties.bas` | Add Part Properties engine and entry point (`main`) |
-| `src/frmAddPartProperties.vba` | Add Part Properties wizard. Controls are built at run time. |
+| `src/AddPartProperties.bas` | Add Part Properties – the whole macro, one module (`main`) |
 | `docs/AddPartProperties-spec.md` | Add Part Properties specification |
-| `tools/build_swp.py` | Generates the `.swp` files in `dist/` from `src/` (Python 3, standard library only) |
-| `dist/*.swp` | The built macros |
+| `tools/build_swp.py` | Generates `dist/SafeRename.swp` from `src/` (Python 3, standard library only) |
+| `dist/SafeRename.swp` | The built Safe Rename macro |
 
-Rebuild after changing the sources (builds both macros; `python3 tools/build_swp.py AddPartProperties` builds one):
+Rebuild Safe Rename after changing its sources:
 
 ```
 python3 tools/build_swp.py
